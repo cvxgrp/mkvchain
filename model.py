@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import warnings
 from scipy.special import softmax
 
 from utils import to_dataset, to_dataset_ignore_na
@@ -18,55 +19,49 @@ class FeatureDependentMarkovChain():
         self.lam = lam
         self.eps = eps
 
-    def fit(self, states, features, verbose=False):
+    def fit(self, states, features, lengths, verbose=False):
         """
         Args:
-            - states: list of state sequences, or single state sequence
-            - features: list of feature arrays, or single feature array
+            - states: numpy array of states
+            - features: numpy array of features
+            - lengths: numpy array of lengths of each sequence
         """
-        if not isinstance(states[0], list):
-            assert len(states) == features.shape[0]
-            states = [states]
-            features = [features]
+        N, p = features.shape
 
-        p = features[0].shape[1]
-
-        models = {}
-
+        self.models = {}
         prev_loss = float("inf")
         for k in range(self.n_iter):
             X = dict([(i, []) for i in range(self.n)])
             Y = dict([(i, []) for i in range(self.n)])
             weights = dict([(i, []) for i in range(self.n)])
-            for s, f in zip(states, features):
-                if len(models) == 0:
+            i = 0
+            for length in lengths:
+                s = states[i:i+length]
+                f = features[i:i+length]
+                if k == 0:
                     l = to_dataset_ignore_na(s, f, self.n)
-                    if verbose:
-                        print(len(l), "pairs exist")
                 else:
                     # Get Ps
-                    Ps = [softmax(f[:-1] @ models[i][0] + models[i][1], axis=1) for i in range(self.n)]
-                    Ps = np.array(Ps)
-                    Ps = np.swapaxes(Ps, 0, 1)
-                    Ps = np.swapaxes(Ps, 1, 2)
+                    Ps = self.predict(f[:-1])
                     l = to_dataset(list(Ps), s, f)
-                    if k == 1 and verbose:
-                        print(len(l), "length")
 
                 for feat, w, state, next_state in l:
                     X[state].append(feat)
                     Y[state].append(next_state)
                     weights[state].append(w)
+                i += length
 
             loss = 0.
             for i in range(self.n):
                 if len(weights[i]) == 0: # no data points
+                    warnings.warn("No pairs found in the dataset; results might be innacurate or useless.")
                     A = np.zeros((p, self.n))
                     b = np.zeros(self.n)
                     l = 0.
                 else:
-                    A, b, l = self._logistic_regression(np.array(weights[i]), np.array(X[i]), np.array(Y[i]), self.lam)
-                models[i] = (A, b)
+                    weightsi, Xi, Yi = np.array(weights[i]), np.array(X[i]), np.array(Y[i])
+                    A, b, l = self._logistic_regression(weightsi, Xi, Yi, self.lam)
+                self.models[i] = (A, b)
                 loss += l
 
             if k > 0 and loss <= prev_loss and 1 - loss / prev_loss <= self.eps:
@@ -76,7 +71,6 @@ class FeatureDependentMarkovChain():
                     print(k, loss)
             if k > 0:
                 prev_loss = loss
-        self.models = models
 
     def _logistic_regression(self, weights, X, Y, lam):
         torch.set_default_dtype(torch.double)
@@ -106,6 +100,33 @@ class FeatureDependentMarkovChain():
         b_numpy = b.detach().numpy()
         return (A_numpy, b_numpy, loss().item())
 
+    def predict(self, features):
+        return np.array([softmax(features @ self.models[i][0] + self.models[i][1], axis=1) for i in range(self.n)]).swapaxes(0,1).swapaxes(1,2)
+
+    def score(self, states, features, lengths):
+        X = dict([(i, []) for i in range(self.n)])
+        Y = dict([(i, []) for i in range(self.n)])
+        i = 0
+        for length in lengths:
+            s = states[i:i+length]
+            f = features[i:i+length]
+            l = to_dataset_ignore_na(s, f, self.n)
+
+            for feat, w, state, next_state in l:
+                X[state].append(feat)
+                Y[state].append(next_state)
+            i += length
+
+        ll = 0.
+        for i in range(self.n):
+            if len(X[i]) == 0:
+                continue
+            Ps = self.predict(np.array(X[i]))
+            ll += (np.log(Ps[:, :, i]) * np.array(Y[i])).sum() / len(X[i])
+
+        return ll
+
+
 
 if __name__ == "__main__":
     np.random.seed(2)
@@ -125,8 +146,8 @@ if __name__ == "__main__":
             s = np.random.choice(np.arange(n), p=Ps[t][:,s])
             states.append(s)
 
-        for i in np.random.choice(np.arange(T), np.random.randint(0, T)):
+        for i in np.random.choice(np.arange(1, T-1), np.random.randint(0, T)):
             states[i] = np.nan
 
     model = FeatureDependentMarkovChain(n, 50)
-    model.fit(states, features, verbose=True)
+    model.fit(states, features, [len(states)], verbose=True)
