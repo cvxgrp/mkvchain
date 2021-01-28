@@ -36,6 +36,9 @@ class FeatureDependentMarkovChain():
             weights = dict([(i, []) for i in range(self.n)])
             i = 0
             for length in lengths:
+                if length <= 1:
+                    i += length
+                    continue
                 s = states[i:i+length]
                 f = features[i:i+length]
                 if k == 0:
@@ -108,6 +111,9 @@ class FeatureDependentMarkovChain():
         Y = dict([(i, []) for i in range(self.n)])
         i = 0
         for length in lengths:
+            if length <= 1:
+                i += length
+                continue
             s = states[i:i+length]
             f = features[i:i+length]
             l = to_dataset_ignore_na(s, f, self.n)
