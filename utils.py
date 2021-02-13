@@ -34,6 +34,8 @@ def to_dataset(Ps, states, features):
     assert features.shape[0] == T
     assert not np.isnan(states[0]) and not np.isnan(states[-1])
 
+    Ps = [P.T for P in Ps]
+
     l = []
 
     i = 0
@@ -87,7 +89,7 @@ def to_dataset_brute_force(Ps, states, features):
             continue
         prob = 1.
         for t in range(T-1):
-            prob *= Ps[t][seq[t+1], seq[t]]
+            prob *= Ps[t][seq[t], seq[t+1]]
         d[seq] = prob
 
     l = []
@@ -114,12 +116,12 @@ if __name__ == "__main__":
         Ps = []
         for t in range(T-1):
             P = np.random.rand(n, n)
-            P /= P.sum(axis=0)
+            P /= P.sum(axis=1)[:, None]
             Ps.append(P)
         s = 0
         states = [s]
         for t in range(T-1):
-            s = np.random.choice(np.arange(n), p=Ps[t][:,s])
+            s = np.random.choice(np.arange(n), p=Ps[t][s,:])
             states.append(s)
 
         for i in np.random.choice(np.arange(1, T-1), np.random.randint(0, T)):

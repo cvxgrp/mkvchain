@@ -71,7 +71,7 @@ class FeatureDependentMarkovChain():
                 break
             if k > 0:
                 if verbose:
-                    print(k, loss)
+                    print(k, -loss)
             if k > 0:
                 prev_loss = loss
 
@@ -104,7 +104,7 @@ class FeatureDependentMarkovChain():
         return (A_numpy, b_numpy, loss().item())
 
     def predict(self, features):
-        return np.array([softmax(features @ self.models[i][0] + self.models[i][1], axis=1) for i in range(self.n)]).swapaxes(0,1).swapaxes(1,2)
+        return np.array([softmax(features @ self.models[i][0] + self.models[i][1], axis=1) for i in range(self.n)]).swapaxes(0,1)
 
     def score(self, states, features, lengths):
         X = dict([(i, []) for i in range(self.n)])
@@ -128,10 +128,9 @@ class FeatureDependentMarkovChain():
             if len(X[i]) == 0:
                 continue
             Ps = self.predict(np.array(X[i]))
-            ll += (np.log(Ps[:, :, i]) * np.array(Y[i])).sum() / len(X[i])
+            ll += (np.log(Ps[:, i, :]) * np.array(Y[i])).sum()
 
         return ll
-
 
 
 if __name__ == "__main__":
@@ -140,20 +139,19 @@ if __name__ == "__main__":
     n = 2
     features = np.random.randn(T, 3)
 
-    for _ in range(100):
-        Ps = []
-        for t in range(T-1):
-            P = np.random.rand(n, n)
-            P /= P.sum(axis=0)
-            Ps.append(P)
-        s = 0
-        states = [s]
-        for t in range(T-1):
-            s = np.random.choice(np.arange(n), p=Ps[t][:,s])
-            states.append(s)
+    Ps = []
+    for t in range(T-1):
+        P = np.random.rand(n, n)
+        P /= P.sum(axis=1)[:, None]
+        Ps.append(P)
+    s = 0
+    states = [s]
+    for t in range(T-1):
+        s = np.random.choice(np.arange(n), p=Ps[t][s,:])
+        states.append(s)
 
-        for i in np.random.choice(np.arange(1, T-1), np.random.randint(0, T)):
-            states[i] = np.nan
+    for i in np.random.choice(np.arange(1, T-1), np.random.randint(0, T)):
+        states[i] = np.nan
 
-    model = FeatureDependentMarkovChain(n, 50)
+    model = FeatureDependentMarkovChain(n, 50, eps=1e-6)
     model.fit(states, features, [len(states)], verbose=True)
