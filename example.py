@@ -11,12 +11,12 @@ if __name__ == "__main__":
         T = 200
         n = 3
         P = np.random.rand(n, n) + .1
-        P /= P.sum(axis=0)
+        P /= P.sum(axis=1)[:,None]
 
         s = 0
         states = [s]
         for t in range(T-1):
-            s = np.random.choice(np.arange(n), p=P[:, s])
+            s = np.random.choice(np.arange(n), p=P[s, :])
             states.append(s)
 
         i = 5
@@ -27,7 +27,7 @@ if __name__ == "__main__":
         s = 0
         states_test = [s]
         for t in range(T-1):
-            s = np.random.choice(np.arange(n), p=P[:, s])
+            s = np.random.choice(np.arange(n), p=P[s, :])
             states_test.append(s)
 
         model1 = FeatureDependentMarkovChain(n, n_iter=1)
