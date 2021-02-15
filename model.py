@@ -6,15 +6,17 @@ from scipy.special import softmax
 from utils import to_dataset, to_dataset_ignore_na
 
 class FeatureDependentMarkovChain():
-    def __init__(self, num_states, n_iter=50, lam_frob=0.1, W_lap_states=None,
-                 W_lap_features=None, eps=1e-6, mask=None):
+    def __init__(self, num_states,  mask=None, lam_frob=0.1, W_lap_states=None,
+                 W_lap_features=None, eps=1e-6, n_iter=50):
         """
         Args:
             - num_states
-            - n_iter
-            - lam
-            - eps
             - mask
+            - lam_frob
+            - W_lap_states
+            - W_lap_features
+            - eps
+            - n_iter
         """
         self.n = num_states
         self.n_iter = n_iter
@@ -39,6 +41,8 @@ class FeatureDependentMarkovChain():
             - states: numpy array of states
             - features: numpy array of features
             - lengths: numpy array of lengths of each sequence
+            - verbose:
+            - warm_start: 
         """
         N, m = features.shape
 
@@ -155,7 +159,6 @@ class FeatureDependentMarkovChain():
         return (A_numpy, b_numpy, loss().item())
 
     def predict(self, features):
-        import IPython as ipy
         P = []
         for i in range(self.n):
             yi = np.zeros((features.shape[0], self.n))
