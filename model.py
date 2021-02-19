@@ -2,11 +2,12 @@ import torch
 import numpy as np
 import warnings
 from scipy.special import softmax
+from optimizer import AdaptiveProximalGradient as APG
 
 from utils import to_dataset, to_dataset_ignore_na
 
 class FeatureDependentMarkovChain():
-    def __init__(self, num_states,  mask=None, lam_frob=0.1, W_lap_states=None,
+    def __init__(self, num_states, mask=None, lam_frob=0.1, W_lap_states=None,
                  W_lap_features=None, eps=1e-6, n_iter=50):
         """
         Args:
@@ -35,7 +36,7 @@ class FeatureDependentMarkovChain():
         for s in self.sizes:
             assert s > 0, "Mask must have at least one state > 0"
 
-    def fit(self, states, features, lengths, verbose=False, warm_start=False):
+    def fit(self, states, features, lengths, verbose=False, warm_start=False, **kwargs):
         """
         Args:
             - states: numpy array of states
@@ -59,7 +60,7 @@ class FeatureDependentMarkovChain():
                     continue
                 s = states[i:i+length]
                 f = features[i:i+length]
-                if k == 0 and not warm_start:
+                if k == 0:
                     l = to_dataset_ignore_na(s, f, self.n)
                 else:
                     # Get Ps
@@ -69,23 +70,25 @@ class FeatureDependentMarkovChain():
                 for feat, w, state, next_state in l:
                     zero = self.zero[state]
                     if np.any(next_state[zero] > 0):
-                        warnings.warn("Transition from", state, "to", next_state, "impossible according to mask. Ignoring transition.")
+                        warnings.warn("Transition from " + str(state) + " to " + str(next_state) + " impossible according to mask. Ignoring transition.")
+                        continue
+                    if np.any(np.isnan(feat)):
                         continue
                     X[state].append(feat)
                     Y[state].append(next_state)
                     weights[state].append(w)
                 i += length
 
-            loss = 0.
-
             ws, Xs, Ys = [], [], []
             for i in range(self.n):
                 noutputs = self.sizes[i]
                 if len(weights[i]) == 0: # no data points
-                    warnings.warn("No pairs found in the dataset starting from state", i, ". results starting from this state might be innacurate or useless.")
+                    warnings.warn("No pairs found in the dataset starting from state " + \
+                        str(i) + " . results starting from this state might be innacurate or useless.")
                     weightsi = np.ones(1)
                     Xi = np.zeros((1, m))
-                    Yi = np.ones((1, noutputs)) / n
+                    Yi = np.zeros((1, noutputs))
+                    Yi[self.nonzeros[i]] = 1 / len(self.nonzeros[i])
                 else:
                     weightsi, Xi, Yi = np.array(weights[i]), np.array(X[i]), np.array(Y[i])
                 ws.append(weightsi)
@@ -93,7 +96,7 @@ class FeatureDependentMarkovChain():
                 Ys.append(Yi[:, self.nonzero[i]])
 
             self.As, self.bs, loss = self._logistic_regression(ws, Xs, Ys, self.lam, warm_start=warm_start,
-                                                               W_lap_states=self.W_lap_states, W_lap_features=self.W_lap_features)
+                                               W_lap_states=self.W_lap_states, W_lap_features=self.W_lap_features, **kwargs)
             if k > 0:
                 if verbose:
                     print("%03d | %8.4e" % (k, -loss))
@@ -104,7 +107,7 @@ class FeatureDependentMarkovChain():
 
 
     def _logistic_regression(self, ws, Xs, Ys, lam, warm_start=False,
-                             W_lap_states=None, W_lap_features=None):
+                             W_lap_states=None, W_lap_features=None, **kwargs):
         torch.set_default_dtype(torch.double)
         ws = [torch.from_numpy(w) for w in ws]
         Xs = [torch.from_numpy(X) for X in Xs]
@@ -124,9 +127,12 @@ class FeatureDependentMarkovChain():
             As = [torch.zeros(m, Ys[i].shape[1], requires_grad=True) for i in range(self.n)]
             bs = [torch.zeros(Ys[i].shape[1], requires_grad=True) for i in range(self.n)]
 
-        opt = torch.optim.LBFGS(As + bs, line_search_fn='strong_wolfe')
+        opt = torch.optim.LBFGS(As + bs, max_iter=250, tolerance_grad=1e-8, line_search_fn='strong_wolfe')
+        # opt = torch.optim.SGD(As + bs, lr=1., momentum=.9)
         loss_fn = torch.nn.KLDivLoss(reduction='none')
         lsm = torch.nn.LogSoftmax(dim=1)
+
+        divisor = sum([w.sum().item() for w in ws])
 
         def loss():
             opt.zero_grad()
@@ -137,8 +143,8 @@ class FeatureDependentMarkovChain():
                 A[i,:,self.nonzero[i]] += As[i]
                 b[i,self.nonzero[i]] += bs[i]
                 pred = lsm(Xs[i] @ As[i] + bs[i])
-                l += (loss_fn(pred, Ys[i]).sum(axis=1) * ws[i]).sum()
-            l += lam * A.pow(2).sum()
+                l += (loss_fn(pred, Ys[i]).sum(axis=1) * ws[i]).sum() / divisor
+                l += lam * As[i].pow(2).sum()
             if W_lap_states is not None:
                 rows, cols = W_lap_states.nonzero()
                 A_diff = (A[rows, :, :] - A[cols, :, :]).pow(2).sum((1, 2))
@@ -148,8 +154,8 @@ class FeatureDependentMarkovChain():
                 rows, cols = W_lap_features.nonzero()
                 A_diff = (A[:, rows, :] - A[:, cols, :]).pow(2).sum((0, 2))
                 l += (A_diff * torch.from_numpy(W_lap_features.data)).sum()
-                pass
             l.backward()
+            # print(sum([A.grad.norm(2).sum().item() for A in As]), sum([b.grad.norm(2).sum().item() for b in bs]))
             return l
 
         opt.step(loss)
@@ -180,6 +186,11 @@ class FeatureDependentMarkovChain():
             l = to_dataset_ignore_na(s, f, self.n)
 
             for feat, w, state, next_state in l:
+                if np.any(next_state[self.zero[state]] > 0):
+                    warnings.warn("Transition from " + str(state) + " to " + str(next_state) + " impossible according to mask. Ignoring transition.")
+                    continue
+                if np.any(np.isnan(feat)):
+                    continue
                 X[state].append(feat)
                 Y[state].append(next_state)
             i += length
@@ -189,7 +200,9 @@ class FeatureDependentMarkovChain():
             if len(X[i]) == 0:
                 continue
             Ps = self.predict(np.array(X[i]))
-            ll += (np.log(Ps[:, i, :]) * np.array(Y[i])).sum()
+            z = np.log(Ps[:, i, :])
+            z[z == -np.inf] = 0.
+            ll += (z * np.array(Y[i])).sum()
 
         return ll
 
