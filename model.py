@@ -8,7 +8,7 @@ from utils import to_dataset, to_dataset_ignore_na
 
 class FeatureDependentMarkovChain():
     def __init__(self, num_states, mask=None, lam_frob=0.1, W_lap_states=None,
-                 W_lap_features=None, eps=1e-6, n_iter=50):
+                 W_lap_features=None, lam_col_norm=0.0, eps=1e-6, n_iter=50):
         """
         Args:
             - num_states
@@ -24,6 +24,7 @@ class FeatureDependentMarkovChain():
         self.lam = lam_frob
         self.W_lap_states = W_lap_states
         self.W_lap_features = W_lap_features
+        self.lam_col_norm = lam_col_norm
         self.eps = eps
         if mask is None:
             self.mask = np.ones((self.n, self.n))
@@ -95,8 +96,13 @@ class FeatureDependentMarkovChain():
                 Xs.append(Xi)
                 Ys.append(Yi[:, self.nonzero[i]])
 
-            self.As, self.bs, loss = self._logistic_regression(ws, Xs, Ys, self.lam, warm_start=warm_start,
-                                               W_lap_states=self.W_lap_states, W_lap_features=self.W_lap_features, **kwargs)
+            if self.lam_col_norm == 0.0:
+                self.As, self.bs, loss = self._logistic_regression(ws, Xs, Ys, self.lam, warm_start=warm_start,
+                                                   W_lap_states=self.W_lap_states, W_lap_features=self.W_lap_features, **kwargs)
+            else:
+                self.As, self.bs, loss = self._logistic_regression_column_norm(ws, Xs, Ys, self.lam, warm_start=warm_start,
+                                                   W_lap_states=self.W_lap_states, W_lap_features=self.W_lap_features,
+                                                   lam_col_norm=self.lam_col_norm, **kwargs)
             if k > 0:
                 if verbose:
                     print("%03d | %8.4e" % (k, -loss))
@@ -164,6 +170,103 @@ class FeatureDependentMarkovChain():
         b_numpy = [b.detach().numpy() for b in bs]
         return (A_numpy, b_numpy, loss().item())
 
+    def _logistic_regression_column_norm(self, ws, Xs, Ys, lam, warm_start=False,
+                             W_lap_states=None, W_lap_features=None, lam_col_norm=.1):
+        torch.set_default_dtype(torch.double)
+        ws = [torch.from_numpy(w) for w in ws]
+        Xs = [torch.from_numpy(X) for X in Xs]
+        Ys = [torch.from_numpy(Y) for Y in Ys]
+
+        m = Xs[0].shape[1]
+
+        if warm_start:
+            assert hasattr(self, "As")
+            assert hasattr(self, "bs")
+            As = [torch.from_numpy(A) for A in self.As]
+            bs = [torch.from_numpy(b) for b in self.bs]
+            for A, b in zip(As, bs):
+                A.requires_grad_(True)
+                b.requires_grad_(True)
+        else:
+            As = [torch.zeros(m, Ys[i].shape[1], requires_grad=True) for i in range(self.n)]
+            bs = [torch.zeros(Ys[i].shape[1], requires_grad=True) for i in range(self.n)]
+
+        loss_fn = torch.nn.KLDivLoss(reduction='none')
+        lsm = torch.nn.LogSoftmax(dim=1)
+
+        divisor = sum([w.sum().item() for w in ws])
+
+        def loss():
+            l = 0
+            A = torch.zeros((self.n, m, self.n))
+            b = torch.zeros((self.n, self.n))
+            for i in range(self.n):
+                A[i,:,self.nonzero[i]] += As[i]
+                b[i,self.nonzero[i]] += bs[i]
+                pred = lsm(Xs[i] @ As[i] + bs[i])
+                l += (loss_fn(pred, Ys[i]).sum(axis=1) * ws[i]).sum() / divisor
+                l += lam * As[i].pow(2).sum()
+            if W_lap_states is not None:
+                rows, cols = W_lap_states.nonzero()
+                A_diff = (A[rows, :, :] - A[cols, :, :]).pow(2).sum((1, 2))
+                b_diff = (b[rows] - b[cols]).pow(2).sum(1)
+                l += ((A_diff + b_diff) * torch.from_numpy(W_lap_states.data)).sum()
+            if W_lap_features is not None:
+                rows, cols = W_lap_features.nonzero()
+                A_diff = (A[:, rows, :] - A[:, cols, :]).pow(2).sum((0, 2))
+                l += (A_diff * torch.from_numpy(W_lap_features.data)).sum()
+            return l
+
+        def r():
+            r = 0.
+            for i in range(m):
+                r += torch.cat([A[i,:] for A in As]).norm()
+            return lam_col_norm * r
+
+        def prox(t):
+            for i in range(m):
+                r = torch.cat([A[i,:] for A in As]).norm()
+                v_norm = r.item()
+                if v_norm < lam_col_norm * t:
+                    mult = 0
+                else:
+                    mult = 1 - lam_col_norm * t / v_norm
+                for A in As:
+                    A.data[i,:] *= mult
+
+        t = 1.
+        for k in range(40):
+            for A, b in zip(As, bs):
+                A.grad = None
+                b.grad = None
+            l = loss()
+            l.backward()
+
+            prev_As = [A.data.clone() for A in As]
+            prev_bs = [b.data.clone() for b in bs]
+            prev_loss = l.item() + r().item()
+            print(k, t, prev_loss)
+            while True:
+                for i in range(self.n):
+                    As[i].data = prev_As[i].data - t * As[i].grad
+                    bs[i].data = prev_bs[i].data - t * bs[i].grad
+                prox(t)
+                cur_loss = loss().item() + r().item()
+                if cur_loss <= prev_loss:
+                    t *= 1.2
+                    break
+                else:
+                    t /= 2
+                if t <= 1e-8:
+                    for i in range(self.n):
+                        As[i].data = prev_As[i].data
+                        bs[i].data = prev_bs[i].data
+                    break
+
+        A_numpy = [A.detach().numpy() for A in As]
+        b_numpy = [b.detach().numpy() for b in bs]
+        return (A_numpy, b_numpy, (loss() + r()).item())
+
     def predict(self, features):
         P = []
         for i in range(self.n):
@@ -173,7 +276,7 @@ class FeatureDependentMarkovChain():
         P = np.array(P).swapaxes(0, 1)
         return P
 
-    def score(self, states, features, lengths):
+    def score(self, states, features, lengths, average=False):
         X = dict([(i, []) for i in range(self.n)])
         Y = dict([(i, []) for i in range(self.n)])
         i = 0
@@ -196,14 +299,17 @@ class FeatureDependentMarkovChain():
             i += length
 
         ll = 0.
+        ct = 0
         for i in range(self.n):
             if len(X[i]) == 0:
                 continue
+            ct += len(X[i])
             Ps = self.predict(np.array(X[i]))
             z = np.log(Ps[:, i, :])
             z[z == -np.inf] = 0.
             ll += (z * np.array(Y[i])).sum()
-
+        if average:
+            ll /= ct
         return ll
 
 
