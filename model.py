@@ -2,7 +2,6 @@ import torch
 import numpy as np
 import warnings
 from scipy.special import softmax
-from optimizer import AdaptiveProximalGradient as APG
 
 from utils import to_dataset, to_dataset_ignore_na
 
